@@ -192,14 +192,29 @@ function ctx() {
       // Salurkan semua suara lewat elemen media, supaya iPhone
       // memperlakukannya seperti memutar lagu: TETAP BERBUNYI
       // meskipun tombol silent/senyap di samping HP menyala.
-      try {
-        const dest = audioCtx.createMediaStreamDestination();
-        keluar.connect(dest);
-        mediaEl = document.createElement("audio");
-        mediaEl.srcObject = dest.stream;
-        mediaEl.setAttribute("playsinline", "");
-        mediaEl.play().catch(() => {});
-      } catch (e) {
+      // Jalur "tembus mode senyap" HANYA untuk iPhone/iPad; di
+      // perangkat lain pakai jalur normal. Kalau jalur khusus itu
+      // gagal, otomatis kembali ke jalur normal — suara tidak
+      // pernah mati total.
+      const adaIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+        (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+      if (adaIOS) {
+        try {
+          const dest = audioCtx.createMediaStreamDestination();
+          keluar.connect(dest);
+          mediaEl = document.createElement("audio");
+          mediaEl.srcObject = dest.stream;
+          mediaEl.setAttribute("playsinline", "");
+          const j = mediaEl.play();
+          if (j && j.catch) j.catch(() => {
+            try { keluar.disconnect(); } catch (e2) {}
+            keluar.connect(audioCtx.destination);
+            mediaEl = null;
+          });
+        } catch (e) {
+          keluar.connect(audioCtx.destination);
+        }
+      } else {
         keluar.connect(audioCtx.destination);
       }
     }
@@ -263,6 +278,7 @@ function ucap(teks, opsi) {
   u.lang = "id-ID";
   u.rate = o.rate || 0.86;   // pelan tapi tidak "merayap"
   u.pitch = o.pitch || 1.0;  // nada normal — pitch rendah justru terdengar seram
+  if (o.onstart) u.onstart = o.onstart; // kabari saat suara BENAR-BENAR mulai
   const v = pilihSuaraId();
   if (v) u.voice = v;
   window.speechSynthesis.speak(u);
@@ -280,17 +296,54 @@ function heningkan() {
    (sejajar dengan index.html) lalu unggah file .mp3 dengan
    nama yang sesuai. Daftar lengkap nama file + naskahnya ada
    di komentar paling atas file ini. */
+/* Seperti putarAtauUcap, tapi memanggil onMulai TEPAT saat suara
+   mulai terdengar (baik dari file maupun TTS) — dipakai mesin napas
+   untuk menyinkronkan hitungan dengan suara. */
+function narasikan(namaFile, teks, rate, onMulai) {
+  if (!SUARA_ON) { if (onMulai) onMulai(); return; }
+  heningkan();
+  let jatuh = false, mulaiOk = false;
+  let a = null;
+  const keTTS = () => {
+    if (jatuh || mulaiOk) return;
+    jatuh = true;
+    if (a) { try { a.pause(); } catch (e) {} }
+    ucap(teks, { rate: rate || 0.86, onstart: onMulai });
+  };
+  try {
+    a = new Audio("audio/" + namaFile);
+    a.onerror = keTTS;
+    a.onplaying = () => { mulaiOk = true; if (onMulai) onMulai(); };
+    const janji = a.play();
+    if (janji && janji.catch) janji.catch(keTTS);
+    setTimeout(keTTS, 1200);
+    narasiEl = a;
+  } catch (e) { keTTS(); }
+}
+
 function putarAtauUcap(namaFile, teks, rate) {
   if (!SUARA_ON) return;
   heningkan();
+  let sudahJatuh = false, sudahMulai = false;
+  let a = null;
+  const keTTS = () => {
+    if (sudahJatuh || sudahMulai) return;
+    sudahJatuh = true;
+    if (a) { try { a.pause(); } catch (e) {} }
+    ucap(teks, { rate: rate || 0.86 });
+  };
   try {
-    const a = new Audio("audio/" + namaFile);
-    a.onerror = () => ucap(teks, { rate: rate || 0.78 });
+    a = new Audio("audio/" + namaFile);
+    a.onerror = keTTS;
+    a.onplaying = () => { sudahMulai = true; };
     const janji = a.play();
-    if (janji && janji.catch) janji.catch(() => ucap(teks, { rate: rate || 0.78 }));
+    if (janji && janji.catch) janji.catch(keTTS);
+    // JARING PENGAMAN: kalau dalam 1,2 detik file belum berbunyi
+    // (apa pun penyebabnya), suara TTS langsung mengambil alih.
+    setTimeout(keTTS, 1200);
     narasiEl = a;
   } catch (e) {
-    ucap(teks, { rate: rate || 0.78 });
+    keTTS();
   }
 }
 if (window.speechSynthesis) {
@@ -523,28 +576,14 @@ function LayarNapas() {
   const totalSiklus = useRef(0);
 
   const hentikanMesin = () => {
-    if (timer.current) { clearInterval(timer.current); timer.current = null; }
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    mesin.current = null;
     heningkan();
   };
 
-  const mulaiSesi = () => {
-    hentikanMesin();
-    totalSiklus.current = 0;
-    mesin.current = { mode: "fase", idx: 0, sisa: pola.fase[0].detik, siklus: 0 };
-    umumkanFase(0, true);
-    render();
-    timer.current = setInterval(tik, 1000);
-    setTahap("jalan");
-  };
-
-  const umumkanFase = (idx, pertama) => {
-    const f = pola.fase[idx];
-    // label diucapkan santai — tidak lagi berebut waktu dengan hitungan
-    const fileLabel = { "Tarik napas": "napas-tarik.mp3", "Tahan": "napas-tahan.mp3", "Hembuskan": "napas-hembus.mp3" }[f.label];
-    putarAtauUcap(fileLabel, f.label, 0.8);
-    if (f.label === "Tarik napas") { suaraNapas(true, f.detik); dentang(440, 0.6); }
-    else if (f.label === "Hembuskan") { suaraNapas(false, f.detik); dentang(392, 0.6); }
-    else dentang(523, 0.5);
+  const jadwal = (fn, ms) => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(fn, ms);
   };
 
   const render = () => {
@@ -554,43 +593,76 @@ function LayarNapas() {
       setTampil({ mode: "jeda", label: "Jeda…", angka: m.sisa, skala: 0.72, durasi: 1.2, siklus: m.siklus });
     } else {
       const f = pola.fase[m.idx];
-      // angka MENGHITUNG MAJU (1, 2, 3, 4) — sama persis dengan suara hitungan
-      const berlalu = f.detik - m.sisa + 1;
-      setTampil({ mode: "fase", label: f.label, angka: berlalu, skala: f.skala, durasi: f.detik, siklus: m.siklus });
+      // tikKe 0 = masih menunggu suara mulai → angka belum ditampilkan
+      setTampil({ mode: "fase", label: f.label, angka: m.tikKe > 0 ? m.tikKe : null, skala: f.skala, durasi: f.detik, siklus: m.siklus });
     }
   };
 
-  const tik = () => {
-    const m = mesin.current;
-    if (!m) return;
-    if (m.sisa > 1) {
-      m.sisa -= 1;
-      if (m.mode === "fase") {
-        const f = pola.fase[m.idx];
-        const berlalu = f.detik - m.sisa + 1;
-        // hitungan TIDAK diucapkan lagi (terasa kejar-kejaran dengan label);
-        // ritme dibawa nada lembut yang MENAIK tiap detik — dengan mata
-        // terpejam pun tetap terasa sudah hitungan ke berapa
-        dentang(440 + berlalu * 50, 0.22, 0.04);
-      }
+  const tikFase = () => {
+    const m = mesin.current; if (!m || m.mode !== "fase") return;
+    const f = pola.fase[m.idx];
+    if (m.tikKe < f.detik) {
+      m.tikKe += 1;
+      dentang(440 + m.tikKe * 50, 0.22, 0.04);
       render();
-      return;
-    }
-    // waktunya pindah
-    if (m.mode === "jeda") {
-      m.mode = "fase"; m.idx = 0; m.sisa = pola.fase[0].detik;
-      umumkanFase(0);
+      jadwal(tikFase, 1000);
     } else if (m.idx < pola.fase.length - 1) {
-      m.idx += 1; m.sisa = pola.fase[m.idx].detik;
-      umumkanFase(m.idx);
+      mulaiFase(m.idx + 1);
     } else {
       // satu siklus penuh selesai → jeda
       m.siklus += 1; totalSiklus.current = m.siklus;
       m.mode = "jeda"; m.sisa = JEDA_SIKLUS;
       dentang(392, 1.0);
       putarAtauUcap("napas-jeda.mp3", "Siklus " + m.siklus + " selesai... santai dulu sebentar, ya.", 0.86);
+      render();
+      jadwal(tikJeda, 1000);
     }
-    render();
+  };
+
+  const tikJeda = () => {
+    const m = mesin.current; if (!m || m.mode !== "jeda") return;
+    if (m.sisa > 1) {
+      m.sisa -= 1;
+      render();
+      jadwal(tikJeda, 1000);
+    } else {
+      mulaiFase(0);
+    }
+  };
+
+  const mulaiFase = (idx) => {
+    const m = mesin.current; if (!m) return;
+    m.mode = "fase"; m.idx = idx; m.tikKe = 0; // 0 = menunggu suara
+    const f = pola.fase[idx];
+    // efek napas & bel menyala bersamaan dengan suara
+    if (f.label === "Tarik napas") { suaraNapas(true, f.detik); dentang(440, 0.6); }
+    else if (f.label === "Hembuskan") { suaraNapas(false, f.detik); dentang(392, 0.6); }
+    else dentang(523, 0.5);
+    render(); // label tampil dulu, angka menunggu
+
+    // === INTI SINKRONISASI ===
+    // Hitungan detik BARU berjalan tepat saat suara mulai terdengar,
+    // jadi suara dan angka selalu berangkat bersama.
+    let sudah = false;
+    const mulaiHitung = () => {
+      if (sudah) return; sudah = true;
+      const mk = mesin.current;
+      if (!mk || mk.mode !== "fase" || mk.idx !== idx) return;
+      mk.tikKe = 1;
+      render();
+      jadwal(tikFase, 1000);
+    };
+    const fileLabel = { "Tarik napas": "napas-tarik.mp3", "Tahan": "napas-tahan.mp3", "Hembuskan": "napas-hembus.mp3" }[f.label];
+    narasikan(fileLabel, f.label, 0.9, mulaiHitung);
+    setTimeout(mulaiHitung, 800); // jaring pengaman kalau suara telat/mati
+  };
+
+  const mulaiSesi = () => {
+    hentikanMesin();
+    totalSiklus.current = 0;
+    mesin.current = { mode: "fase", idx: 0, tikKe: 0, sisa: 0, siklus: 0 };
+    setTahap("jalan");
+    mulaiFase(0);
   };
 
   useEffect(() => () => hentikanMesin(), []); // bersihkan saat keluar layar
@@ -1502,8 +1574,16 @@ function DinamisApp() {
   }, []);
 
   const masuk = () => {
-    nyalakanLatar();      // ketukan tombol ini = izin audio dari browser,
-    dentang(523, 1.0);    // jadi musik langsung mengalun begitu masuk
+    ctx();                // buka izin audio efek/musik dalam ketukan ini
+    if (window.speechSynthesis) {
+      // buka izin suara panduan di iPhone/iPad (perlu "dipancing"
+      // sekali dari dalam sentuhan pengguna)
+      const u = new SpeechSynthesisUtterance(" ");
+      u.volume = 0;
+      window.speechSynthesis.speak(u);
+    }
+    nyalakanLatar();      // musik mengalun begitu masuk
+    dentang(523, 1.0);
     setGerbang(false);
   };
 
@@ -1527,6 +1607,7 @@ function DinamisApp() {
         <p style={{ color: "var(--muted)", fontSize: 11.5, marginTop: 14 }}>
           Musik latar akan mengalun begitu kamu masuk 🎵
         </p>
+        <p style={{ color: "var(--line)", fontSize: 10, marginTop: 18 }}>v18</p>
       </div>
     );
   }
