@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+ <!DOCTYPE html>
 <html lang="id">
 <head>
 <meta charset="UTF-8" />
@@ -270,10 +270,15 @@ function pilihSuaraId() {
       || voices.find((v) => v.lang && v.lang.startsWith("id"))
       || null;
 }
+let uTerakhir = null; // simpan rujukan: iOS bisa memutus suara yang "dibuang"
 function ucap(teks, opsi) {
   if (!SUARA_ON || !window.speechSynthesis) return;
   const o = opsi || {};
-  if (!o.antri) window.speechSynthesis.cancel(); // antri=true: tidak memotong ucapan sebelumnya
+  const s = window.speechSynthesis;
+  if (!o.antri) s.cancel(); // antri=true: tidak memotong ucapan sebelumnya
+  // BUG iOS yang terkenal: setelah cancel(), mesin suara bisa "macet
+  // diam" dalam keadaan paused — harus dibangunkan dengan resume()
+  try { if (s.paused) s.resume(); } catch (e) {}
   const u = new SpeechSynthesisUtterance(teks);
   u.lang = "id-ID";
   u.rate = o.rate || 0.86;   // pelan tapi tidak "merayap"
@@ -281,7 +286,10 @@ function ucap(teks, opsi) {
   if (o.onstart) u.onstart = o.onstart; // kabari saat suara BENAR-BENAR mulai
   const v = pilihSuaraId();
   if (v) u.voice = v;
-  window.speechSynthesis.speak(u);
+  uTerakhir = u;
+  s.speak(u);
+  // jaga-jaga iOS: kalau sedetik kemudian mesin masih "paused", bangunkan
+  setTimeout(() => { try { if (s.paused) s.resume(); } catch (e) {} }, 250);
 }
 let narasiEl = null; // pemutar file narasi yang sedang berjalan
 function heningkan() {
@@ -1573,6 +1581,54 @@ function DinamisApp() {
     return () => window.removeEventListener("pointerdown", mulai);
   }, []);
 
+  const [hasilTes, setHasilTes] = useState(null);
+
+  const tesSuara = () => {
+    const hasil = { bel: "… mencoba", suara: "… mencoba", musik: "… mencoba" };
+    setHasilTes({ ...hasil });
+    // 1) bel / efek (Web Audio)
+    try {
+      const c = ctx();
+      if (c) {
+        dentang(660, 0.6, 0.12);
+        hasil.bel = c.state === "running" ? "✓ jalur efek aktif — harusnya terdengar 'ting'" : "✗ audio ditahan browser (state: " + c.state + ")";
+      } else hasil.bel = "✗ Web Audio tidak didukung";
+    } catch (e) { hasil.bel = "✗ error: " + e.message; }
+    setHasilTes({ ...hasil });
+    // 2) suara panduan (TTS)
+    if (window.speechSynthesis) {
+      const s = window.speechSynthesis;
+      s.cancel();
+      try { if (s.paused) s.resume(); } catch (e) {}
+      const u = new SpeechSynthesisUtterance("Halo. Suara panduan aktif.");
+      u.lang = "id-ID"; u.rate = 0.95;
+      u.onstart = () => { hasil.suara = "✓ suara panduan berbunyi"; setHasilTes({ ...hasil }); };
+      u.onerror = () => { hasil.suara = "✗ suara panduan gagal berbunyi"; setHasilTes({ ...hasil }); };
+      uTerakhir = u;
+      s.speak(u);
+      setTimeout(() => {
+        if (hasil.suara.indexOf("…") === 0) { hasil.suara = "✗ suara panduan diam (mesin TTS tidak merespons)"; setHasilTes({ ...hasil }); }
+        try { if (s.paused) s.resume(); } catch (e) {}
+      }, 2500);
+    } else hasil.suara = "✗ perangkat tidak mendukung TTS";
+    setHasilTes({ ...hasil });
+    // 3) file musik
+    try {
+      const a = new Audio("audio/musik.mp3");
+      a.volume = 0.6;
+      a.onplaying = () => {
+        hasil.musik = "✓ audio/musik.mp3 ditemukan & berbunyi";
+        setHasilTes({ ...hasil });
+        setTimeout(() => { try { a.pause(); } catch (e) {} }, 5000);
+      };
+      a.onerror = () => { hasil.musik = "✗ file audio/musik.mp3 TIDAK ADA di repositori"; setHasilTes({ ...hasil }); };
+      const p = a.play();
+      if (p && p.catch) p.catch(() => {
+        if (hasil.musik.indexOf("…") === 0) { hasil.musik = "✗ musik tidak bisa diputar (file tidak ada / diblokir)"; setHasilTes({ ...hasil }); }
+      });
+    } catch (e) { hasil.musik = "✗ error: " + e.message; setHasilTes({ ...hasil }); }
+  };
+
   const masuk = () => {
     ctx();                // buka izin audio efek/musik dalam ketukan ini
     if (window.speechSynthesis) {
@@ -1607,7 +1663,19 @@ function DinamisApp() {
         <p style={{ color: "var(--muted)", fontSize: 11.5, marginTop: 14 }}>
           Musik latar akan mengalun begitu kamu masuk 🎵
         </p>
-        <p style={{ color: "var(--line)", fontSize: 10, marginTop: 18 }}>v18</p>
+        <button onClick={tesSuara} style={{
+          marginTop: 18, background: "none", border: "1.5px solid var(--line)",
+          borderRadius: 999, color: "var(--muted)", fontWeight: 700, fontSize: 12,
+          padding: "7px 16px", cursor: "pointer",
+        }}>🔧 Tes suara</button>
+        {hasilTes && (
+          <div style={{ marginTop: 12, textAlign: "left", fontSize: 12.5, lineHeight: 1.9, color: "var(--muted)", background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 14, padding: "10px 14px", maxWidth: 320 }}>
+            <div>Efek: {hasilTes.bel}</div>
+            <div>Panduan: {hasilTes.suara}</div>
+            <div>Musik: {hasilTes.musik}</div>
+          </div>
+        )}
+        <p style={{ color: "var(--line)", fontSize: 10, marginTop: 14 }}>v19</p>
       </div>
     );
   }
